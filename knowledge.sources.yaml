@@ -1,0 +1,139 @@
+---
+apiVersion: cic.knowledge/v1
+kind: KnowledgeSources
+
+metadata:
+  name: cic-mcp-knowledge-sources
+
+profiles:
+  public:
+    includeVisibility:
+      - public
+      - public-placeholder
+  internal:
+    includeVisibility:
+      - public
+      - private
+      - private-until-poc
+
+sources:
+  - id: cic-basic-knowledge
+    path: source/CentralInfraCore/CIC-basic-knowledge
+    repo: git@github.com:CentralInfraCore/github_private.git
+    role: static_knowledge_base
+    visibility: private-until-poc
+
+  - id: cic-relay
+    path: source/CentralInfraCore/CIC-Relay
+    repo: git@github.com:CentralInfraCore/CIC_Relay.git
+    role: relay_runtime
+    visibility: private-until-poc
+
+  - id: cic-schemas
+    path: source/CentralInfraCore/CIC-Schemas
+    repo: git@github.com:CentralInfraCore/CIC_Schemas.git
+    role: schema_source
+    visibility: public
+
+  - id: openintentsign-github
+    path: source/OpenIntentSign/github
+    repo: git@github.com:OpenIntentSign/.github.git
+    role: trust_model_spec
+    visibility: public
+
+  - id: base-base
+    path: source/CentralInfraCore/base/base
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: main
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: base-docs
+    path: source/CentralInfraCore/base/docs
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: docs/main
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: base-golang
+    path: source/CentralInfraCore/base/golang
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: golang/main
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: base-schemas
+    path: source/CentralInfraCore/base/schemas
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: schemas/main
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: base-workflows
+    path: source/CentralInfraCore/base/workflows
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: workflows/main
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: base-iac
+    path: source/CentralInfraCore/base/IaC
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: IaC/devel
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: base-mcp
+    path: source/CentralInfraCore/base/mcp
+    repo: git@github.com:CentralInfraCore/base-repo.git
+    branch: mcp/main
+    role: multi_branch_base_repository
+    visibility: public
+
+  - id: schemas-postgresql
+    path: source/CentralInfraCore/schemas/postgresql
+    repo: git@github.com:CentralInfraCore/CIC_Schemas.git
+    role: schema_example
+    visibility: public
+
+  - id: schemas-template
+    path: source/CentralInfraCore/schemas/template
+    repo: git@github.com:CentralInfraCore/CIC_Schemas.git
+    role: schema_template
+    visibility: public
+
+  - id: cic-primitives
+    path: source/CentralInfraCore/CIC-objs/cic-primitives
+    repo: git@github.com:CentralInfraCore/cic-primitives.git
+    role: domain_repo
+    visibility: public
+
+  - id: cic-compute
+    path: source/CentralInfraCore/CIC-objs/cic-compute
+    repo: git@github.com:CentralInfraCore/cic-compute.git
+    role: domain_repo
+    visibility: public
+
+  - id: cic-kubernetes
+    path: source/CentralInfraCore/CIC-objs/cic-kubernetes
+    repo: git@github.com:CentralInfraCore/cic-kubernetes.git
+    role: domain_repo
+    visibility: public
+
+  - id: cic-network
+    path: source/CentralInfraCore/CIC-objs/cic-network
+    repo: git@github.com:CentralInfraCore/cic-network.git
+    role: domain_repo
+    visibility: public
+
+  - id: cic-storage
+    path: source/CentralInfraCore/CIC-objs/cic-storage
+    repo: git@github.com:CentralInfraCore/cic-storage.git
+    role: domain_repo
+    visibility: public
+
+  - id: cic-yang
+    path: source/CentralInfraCore/CIC-objs/cic-yang
+    repo: git@github.com:CentralInfraCore/cic-yang.git
+    role: domain_repo
+    visibility: public
