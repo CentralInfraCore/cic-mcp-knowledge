@@ -9,9 +9,10 @@
 # MCP config (generated, contains absolute paths)
 /.mcp.json
 
+# Generated repo-topology artifact (see knowledge.sources.yaml / project.yaml knowledge: block)
+/.gitmodules
+
 # Generated knowledge base files
-/kb_data/pkl/
-/kb_data/json/
-/kb_data/manifest.json
+/kb_data/
 /sqlite_data/*.sqlite
 /sqlite_data/*.sqlite3
