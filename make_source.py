@@ -158,7 +158,6 @@ def process_go_yaml(file_path):
         fields        = obj.get('fields', [])
         iface_methods = obj.get('methods', [])
 
-        # Format signature string from AST params/returns if available
         sig_str = ''
         if signature:
             params = ', '.join(
@@ -200,6 +199,7 @@ def process_go_yaml(file_path):
             'end_line':   position.get('end_line', 1),
             'lang': 'go',
             'type': f'go_{kind}' if kind else 'go_object',
+            'calls': calls,
         }
         chunk.update(meta)
         chunks.append(chunk)
@@ -444,6 +444,30 @@ def create_knowledge_graph_with_content(chunks, embeddings):
                         seen_refs.add(key)
                         edges.append({'from': src_node, 'to': dst_node, 'type': 'references',
                                       'weight': 1.0, 'evidence_chunk_id': chunk['id']})
+
+    # Call graph edges from AST calls lists.
+    # Resolves internal calls by name within indexed Go chunks.
+    # pkg.Name format: only the Name part is matched (pkg aliases can't be resolved cross-file).
+    call_name_index: dict = {}
+    for i, chunk in enumerate(chunks):
+        if chunk.get('lang') == 'go' and chunk.get('type', '').startswith('go_'):
+            call_name_index.setdefault(chunk['section'], []).append(f"n{i + 1}")
+
+    seen_calls: set = set()
+    for i, chunk in enumerate(chunks):
+        if chunk.get('lang') != 'go':
+            continue
+        src_node = f"n{i + 1}"
+        for call in chunk.get('calls', []):
+            name = call.split('.')[-1] if '.' in call else call
+            for dst_node in call_name_index.get(name, []):
+                if dst_node != src_node:
+                    key = (src_node, dst_node)
+                    if key not in seen_calls:
+                        seen_calls.add(key)
+                        edges.append({'from': src_node, 'to': dst_node,
+                                      'type': 'calls', 'weight': 1.0,
+                                      'evidence_chunk_id': chunk['id']})
 
     for i, edge in enumerate(edges):
         edge['id'] = f'e{i+1}'
