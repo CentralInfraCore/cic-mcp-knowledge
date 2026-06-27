@@ -1,8 +1,58 @@
-# CLAUDE.md — CentralInfraCore MCP Base
+# CLAUDE.md — cic-mcp-knowledge
 
 ## Mi ez a repo?
 
-Ez a **CentralInfraCore MCP base template** — egy alap Git repo amit git remote merge-vel raknak rá más CIC-ből származó repokra. Nem önálló termék, hanem template: a belőle levont repok öröklik az MCP szerver infrastruktúráját, a build tooling-ot és a release folyamatot.
+Ez a `cic-mcp-*` család **knowledge / KB graph rétege**: deklarált source-okból generált,
+kereshető tudásgráfot szolgál ki MCP-n keresztül.
+
+A repo a `base-repo` MCP template-jéből örökli a build/release infrastruktúrát, de a domain
+tartalma a `knowledge.sources.yaml`, a `source/` alatti checkoutok és a generált `kb_data/`
+artifactok köré szerveződik.
+
+## Fő határok
+
+**Igen:**
+- knowledge source manifest és profile-alapú `.gitmodules` generálás
+- markdown/YAML companion alapú KB build
+- BM25/inverted index, FAISS embedding index, graph node/edge artifactok
+- KB graph MCP toolok (`search_query`, `get_chunk`, `neighbors`, `focus_pack`, stb.)
+- companion YAML és agent decision write toolok, SOURCE_DIR confinementtel
+
+**Nem:**
+- session/raw event ingest
+- shared cross-session aggregáció
+- automatikus canonical promotion
+- DB-backed human review/audit lifecycle a canonical státuszhoz
+
+## Trust modell
+
+```yaml
+knowledge_role: generated_kb_graph
+source_manifest: knowledge.sources.yaml
+canonical_runtime_enforced: false
+write_scope: SOURCE_DIR-confined companion/task files
+```
+
+Fontos: a gateway `canonical_facts[]` mappingje jelenleg abból indul ki, hogy a
+`cic-mcp-knowledge` a reviewed/canonical réteg. Ebben a repóban azonban még nincs olyan
+runtime constraint vagy auditált promotion flow, mint a `cic-mcp-shared` review lifecycle
+esetén. Ezt vagy implementálni kell, vagy a gateway trust mappinget kell szűkíteni.
+
+## Jelenlegi állapot
+
+`experimental` — van működő KB graph szerver és source manifest, de a canonical szerződés és a
+dependency lock állapota rendezendő.
+
+- `knowledge.sources.yaml` deklarálja a source-okat és a public/internal profile-okat.
+- `tools/generate_gitmodules.py` ebből generálja a `.gitmodules` artifactot.
+- `make_source.py` generálja a `kb_data/` és `sqlite_data/` artifactokat.
+- `mcp-server/server.py` FastMCP KB szervert ad kereséshez, graph traversalhoz és task/companion
+  íráshoz.
+- `tests/test_tools/test_mcp_server_write_confinement.py` bizonyítja, hogy az író toolok nem
+  írhatnak `SOURCE_DIR` alá zárt fán kívülre.
+
+Korlátok: nincs formális canonical promotion pipeline; a `requirements.txt` jelenleg driftben
+van a `requirements.in` runtime dependency listájához képest, ezért lockfile regenerálás kell.
 
 ## MCP szerver
 

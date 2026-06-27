@@ -1,6 +1,3 @@
----
-version: '3.8'
-
 services:
   # Service for initializing and updating the Python virtual environment cache
   setup:
@@ -9,7 +6,7 @@ services:
       dockerfile: Dockerfile
     # Run as the current host user to avoid file permission issues
     # on mounted volumes.
-    user: "${UID:-1000}:${GID:-1000}"
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     volumes:
       # Mount the project root to access requirements files
       - ./:/app
@@ -21,8 +18,18 @@ services:
       - -c
       - >-
         pip-compile --cache-dir /app/.pip-cache -o requirements.txt
-        requirements.in && pip install --no-cache-dir -r requirements.txt
-        --target /app/p_venv
+        requirements.in && python -m venv --copies /app/p_venv
+        && cp /usr/local/lib/libpython3.11.so.1.0 /app/p_venv/lib/
+        && cp /usr/lib/x86_64-linux-gnu/libssl.so.3 /app/p_venv/lib/
+        && cp /usr/lib/x86_64-linux-gnu/libcrypto.so.3 /app/p_venv/lib/
+        && find /usr/local/lib/python3.11 -mindepth 1 -maxdepth 1 ! -name site-packages -exec cp -a {} /app/p_venv/lib/python3.11/ \;
+        && mv /app/p_venv/bin/python /app/p_venv/bin/python-real
+        && printf '%s\n' '#!/bin/sh' 'VENV_DIR="$$(CDPATH= cd -- "$$(dirname -- "$$0")/.." && pwd)"' 'export PYTHONHOME="$$VENV_DIR"' 'export LD_LIBRARY_PATH="$$VENV_DIR/lib:$${LD_LIBRARY_PATH:-}"' 'exec "$$VENV_DIR/bin/python-real" "$$@"' > /app/p_venv/bin/python
+        && chmod +x /app/p_venv/bin/python
+        && ln -sf python /app/p_venv/bin/python3
+        && ln -sf python /app/p_venv/bin/python3.11
+        && /app/p_venv/bin/pip install --upgrade pip
+        && /app/p_venv/bin/pip install --no-cache-dir -r requirements.txt
 
   # Main service for running build, validation, and release tasks
   builder:
@@ -31,7 +38,7 @@ services:
       dockerfile: Dockerfile
     # Run as the current host user to avoid file permission issues
     # on mounted volumes.
-    user: "${UID:-1000}:${GID:-1000}"
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     volumes:
       # Mount the populated venv directory as a read-only cache
       - ./p_venv:/app/p_venv:ro
@@ -46,7 +53,12 @@ services:
       - "host.docker.internal:host-gateway"
     # Pass through environment variables for the release process
     environment:
-      - PYTHONPATH=/app:/app/p_venv   # Add /app to PYTHONPATH
+      - PATH=/app/p_venv/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - PYTHONPATH=/app
+      - USER=${LOCAL_USER:-cic}
+      - LOGNAME=${LOCAL_USER:-cic}
+      - HOME=/tmp
+      - TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor
       - VAULT_ADDR=https://host.docker.internal:18200
       - CIC_VAULT_TOKEN_FILE=/var/run/secrets/vault-token
       - CIC_VAULT_CA_FILE=/var/run/secrets/vault-ca.crt
