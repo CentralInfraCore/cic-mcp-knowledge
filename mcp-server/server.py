@@ -22,20 +22,29 @@ import os
 import pickle
 import re
 import argparse
+import hashlib
+import json
+import threading
+import time
 import numpy as np
 import faiss
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 from sentence_transformers import SentenceTransformer
 
+# ── watch-mode globals ───────────────────────────────────────────────────────
+_kb: dict | None = None
+_kb_lock = threading.RLock()
+_watch_dir: Path | None = None
+_watch_interval: float = 2.0
+
 mcp = FastMCP("cic-graph")
 
 # Adjust paths to point to the correct location relative to this script
 BASE_DIR = Path(__file__).parent.parent
-DATA_DIR = Path(os.environ.get("KB_DATA_DIR", str(BASE_DIR / "kb_data" / "pkl")))
+DATA_DIR = Path(os.environ.get("KB_DATA_DIR", str(Path.cwd() / "kb_data" / "pkl")))
 
 CHUNKS_PKL = Path(os.environ.get("CHUNKS_PKL", str(DATA_DIR / "chunks.pkl")))
 NODES_PKL = Path(os.environ.get("NODES_PKL", str(DATA_DIR / "graph_nodes.pkl")))
@@ -95,19 +104,33 @@ def _normalize_line_range(val: Any) -> Optional[list[int]]:
     return None
 
 
-@lru_cache(maxsize=1)
 def load_kb() -> dict[str, Any]:
-    """Load all PKL artifacts into memory once."""
+    """Return the in-memory KB, loading from disk on first call."""
+    global _kb
+    with _kb_lock:
+        if _kb is None:
+            _kb = _load_kb_from_disk()
+        return _kb
+
+
+def _load_kb_from_disk() -> dict[str, Any]:
+    """Load all PKL artifacts from disk into a fresh dict."""
     def load_one(p: Path) -> Any:
         if not p.exists():
             raise FileNotFoundError(f"Missing: {p}")
         with p.open("rb") as f:
             return pickle.load(f)
 
+    def load_opt(p: Path, default: Any = None) -> Any:
+        if not p.exists():
+            return default
+        with p.open("rb") as f:
+            return pickle.load(f)
+
     chunks = load_one(CHUNKS_PKL)
-    nodes = load_one(NODES_PKL)
-    edges = load_one(EDGES_PKL)
-    inverted = load_one(INVERTED_PKL)
+    nodes = load_opt(NODES_PKL, {})
+    edges = load_opt(EDGES_PKL, {})
+    inverted = load_opt(INVERTED_PKL, {})
 
     # Normalize chunks container:
     # Supported:
@@ -224,6 +247,15 @@ def load_kb() -> dict[str, Any]:
     else:
         embedding_model = None
 
+    # Build embeddings_by_id from FAISS vectors — needed for incremental watch updates
+    embeddings_by_id: dict[str, np.ndarray] = {}
+    if faiss_idx is not None:
+        for i, cid in enumerate(faiss_chunk_ids):
+            try:
+                embeddings_by_id[str(cid)] = faiss_idx.reconstruct(i)
+            except Exception:
+                pass
+
     return {
         "chunks": chunks_by_id,
         "nodes": nodes_by_id,
@@ -233,6 +265,7 @@ def load_kb() -> dict[str, Any]:
         "inverted": inverted_index,
         "faiss_index": faiss_idx,
         "faiss_chunk_ids": faiss_chunk_ids,
+        "embeddings_by_id": embeddings_by_id,
         "bm25": bm25,
         "embedding_model": embedding_model,
         "meta_idx": load_one(METADATA_INDEX_PKL) if METADATA_INDEX_PKL.exists() else {},
@@ -329,9 +362,13 @@ def _kb_mtimes() -> dict[str, float | None]:
 @mcp.tool()
 def kb_status() -> dict:
     """Return detailed status about loaded KB artifacts."""
+    kb = load_kb()
     return {
         "data_dir": str(DATA_DIR),
-        "cache_info": load_kb.cache_info()._asdict(),
+        "kb_loaded": _kb is not None,
+        "watch_dir": str(_watch_dir) if _watch_dir else None,
+        "chunks": len(kb.get("chunks", {})),
+        "nodes": len(kb.get("nodes", {})),
         "files": {
             "chunks": {
                 "path": str(CHUNKS_PKL),
@@ -377,11 +414,13 @@ def kb_status() -> dict:
 def reload_kb() -> dict:
     """
     Force reload of KB artifacts from disk.
-    Useful after regenerating PKL files.
+    Useful after regenerating PKL files outside of watch mode.
     """
+    global _kb
     before = _kb_mtimes()
-    load_kb.cache_clear()
-    kb = load_kb()
+    with _kb_lock:
+        _kb = _load_kb_from_disk()
+        kb = _kb
     after = _kb_mtimes()
 
     return {
@@ -394,6 +433,211 @@ def reload_kb() -> dict:
         "mtimes_after": after,
     }
 
+
+# ── in-process watch (--watch-dir) ──────────────────────────────────────────
+
+def _watch_process_file(file_path: str) -> list:
+    """Route a changed file to the correct make_source processor."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    import make_source as _ms  # noqa: PLC0415
+
+    if file_path.endswith('.md'):
+        return _ms.process_md_file(file_path)
+    if file_path.endswith(('.yaml', '.yml')):
+        base = os.path.splitext(file_path)[0]
+        if os.path.exists(base + '.go') or _ms._is_go_meta_yaml(file_path):
+            return _ms.process_go_yaml(file_path)
+        if os.path.exists(base + '.py') or _ms._is_py_meta_yaml(file_path):
+            return _ms.process_py_yaml(file_path)
+        if os.path.exists(base + '.md'):
+            return []
+        return _ms.process_yaml_file(file_path)
+    return []
+
+
+def _incremental_update_kb(changed: list, deleted: list) -> dict:
+    """Apply file changes to the in-memory KB. Must be called under _kb_lock."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    import make_source as _ms  # noqa: PLC0415
+
+    kb = _kb
+    if kb is None:
+        return {'removed': 0, 'added': 0, 'total': 0}
+
+    # Remove stale chunks (changed files will be re-added below)
+    fp_set = set(changed + deleted)
+    stale_ids = {
+        cid for cid, c in kb['chunks'].items()
+        if fp_set & set(c.get('file_paths', [c.get('file_path', '')]))
+    }
+    for cid in stale_ids:
+        kb['chunks'].pop(cid, None)
+        kb['embeddings_by_id'].pop(cid, None)
+
+    # Reprocess changed files
+    new_chunks: list = []
+    for fp in changed:
+        try:
+            new_chunks.extend(_watch_process_file(fp))
+        except Exception as exc:
+            print(f"[watch] warn {os.path.basename(fp)}: {exc}", flush=True)
+
+    # Assign IDs continuing from current max
+    nums = [int(c[1:]) for c in kb['chunks'] if c.startswith('c') and c[1:].isdigit()]
+    next_id = max(nums, default=0) + 1
+    for i, chunk in enumerate(new_chunks):
+        chunk['id'] = f'c{next_id + i}'
+        chunk.setdefault('file_paths', [chunk.get('file_path', '')])
+
+    # Embed only new chunks — model already loaded
+    model = kb.get('embedding_model')
+    if new_chunks and model:
+        texts = [c.get('text', '') for c in new_chunks]
+        vecs = model.encode(texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False)
+        for chunk, vec in zip(new_chunks, vecs):
+            kb['chunks'][chunk['id']] = chunk
+            kb['embeddings_by_id'][chunk['id']] = vec.astype('float32')
+
+    # Rebuild FAISS from all current embeddings (no re-encoding)
+    emb = kb['embeddings_by_id']
+    if emb:
+        id_order = list(emb.keys())
+        mat = np.stack([emb[cid] for cid in id_order]).astype('float32')
+        new_idx = faiss.IndexFlatIP(mat.shape[1])
+        new_idx.add(mat)
+        kb['faiss_index'] = new_idx
+        kb['faiss_chunk_ids'] = id_order
+
+    # Rebuild BM25 + inverted index from all current chunks (fast — no encoding)
+    all_chunks = list(kb['chunks'].values())
+    if all_chunks:
+        bm25 = _ms.build_bm25_index(all_chunks)
+        kb['inverted'] = _ms.create_bm25_inverted_index(all_chunks, bm25)
+        kb['bm25'] = bm25
+
+    # Rebuild knowledge graph from all current chunks + embeddings (no re-encoding)
+    emb = kb['embeddings_by_id']
+    if all_chunks and emb:
+        id_order = [c['id'] for c in all_chunks if c['id'] in emb]
+        emb_mat = np.stack([emb[cid] for cid in id_order]).astype('float32')
+        ordered_chunks = [kb['chunks'][cid] for cid in id_order]
+        nodes_list, edges_list = _ms.create_knowledge_graph_with_content(ordered_chunks, emb_mat)
+        kb['nodes'] = {n['id']: n for n in nodes_list}
+        kb['edges'] = edges_list
+        adj: dict = {}
+        for e in edges_list:
+            src = str(e.get('source') or e.get('from') or e.get('src') or '')
+            if src:
+                adj.setdefault(src, []).append(e)
+        kb['adj'] = adj
+        chunk_to_nodes: dict = {}
+        for nid, node in kb['nodes'].items():
+            cid = node.get('chunk_id')
+            if cid:
+                chunk_to_nodes.setdefault(str(cid), []).append(nid)
+        kb['chunk_to_nodes'] = chunk_to_nodes
+
+    return {'removed': len(stale_ids), 'added': len(new_chunks), 'total': len(kb['chunks']),
+            'nodes': len(kb.get('nodes', {})), 'edges': len(kb.get('edges', []))}
+
+
+def _file_hash(path: str) -> str:
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ''
+
+
+def _scan_watch_dir(watch_dir: Path) -> dict:
+    result = {}
+    for root, _, files in os.walk(watch_dir):
+        for fname in files:
+            if any(fname.endswith(e) for e in ('.md', '.yaml', '.yml')) and not fname.startswith('.'):
+                p = os.path.join(root, fname)
+                result[p] = _file_hash(p)
+    return result
+
+
+def _bootstrap_kb_from_source(source_dir: Path) -> None:
+    """Build PKL artifacts from source_dir when starting fresh (no chunks.pkl)."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    import make_source as _ms  # noqa: PLC0415
+
+    print(f"[boot] scanning {source_dir} ...", flush=True)
+    chunks = _ms.process_directory(str(source_dir))
+    chunks = _ms._dedup_chunks(chunks)
+    chunks.sort(key=lambda c: (c.get('file_path', ''), c.get('start_line', 0)))
+    for i, chunk in enumerate(chunks):
+        chunk['id'] = f'c{i + 1}'
+
+    print(f"[boot] {len(chunks)} chunks — embedding ...", flush=True)
+    model_name = _ms.EMBEDDING_MODEL
+    model, embeddings = _ms.create_embeddings([c['text'] for c in chunks], model_name)
+
+    print("[boot] building indexes ...", flush=True)
+    bm25 = _ms.build_bm25_index(chunks)
+    inv = _ms.create_bm25_inverted_index(chunks, bm25)
+    faiss_idx = _ms.build_faiss_index(embeddings)
+
+    print("[boot] building knowledge graph ...", flush=True)
+    nodes_list, edges_list = _ms.create_knowledge_graph_with_content(chunks, embeddings)
+
+    pkl_dir = DATA_DIR
+    pkl_dir.mkdir(parents=True, exist_ok=True)
+
+    import pickle as _pickle
+    for name, obj in [
+        ('chunks.pkl', {c['id']: c for c in chunks}),
+        ('inverted_index.pkl', inv),
+        ('bm25.pkl', bm25),
+        ('chunk_ids.pkl', [c['id'] for c in chunks]),
+        ('model_name.pkl', model_name),
+        ('graph_nodes.pkl', {n['id']: n for n in nodes_list}),
+        ('graph_edges.pkl', {e['id']: e for e in edges_list if 'id' in e}),
+    ]:
+        (pkl_dir / name).write_bytes(_pickle.dumps(obj))
+
+    faiss.write_index(faiss_idx, str(pkl_dir / 'faiss.index'))
+
+    # Persist file state for the watcher
+    current = _scan_watch_dir(source_dir)
+    (DATA_DIR.parent / '.file_state.json').write_text(json.dumps(current, indent=2))
+
+    print(f"[boot] done — {len(chunks)} chunks, {len(nodes_list)} nodes, {len(edges_list)} edges → {pkl_dir}", flush=True)
+
+
+def _watch_loop() -> None:
+    """Background daemon thread: polls watch_dir, applies incremental updates."""
+    state_path = DATA_DIR.parent / '.file_state.json'
+    try:
+        file_state: dict = json.loads(state_path.read_text()) if state_path.exists() else {}
+    except Exception:
+        file_state = {}
+
+    print(f"[watch] watching {_watch_dir}  interval={_watch_interval}s", flush=True)
+    while True:
+        time.sleep(_watch_interval)
+        try:
+            current = _scan_watch_dir(_watch_dir)
+            changed = [p for p, h in current.items() if file_state.get(p) != h]
+            deleted = [p for p in file_state if p not in current]
+            if changed or deleted:
+                ts = time.strftime('%H:%M:%S')
+                print(f"[watch {ts}] {len(changed)} changed, {len(deleted)} deleted", flush=True)
+                with _kb_lock:
+                    s = _incremental_update_kb(changed, deleted)
+                file_state = current
+                state_path.write_text(json.dumps(file_state, indent=2))
+                print(f"[watch] removed={s['removed']} added={s['added']} total={s['total']}", flush=True)
+        except Exception as exc:
+            print(f"[watch] error: {exc}", flush=True)
+
+
+# ── MCP tools ────────────────────────────────────────────────────────────────
 
 @mcp.tool()
 def list_edge_types() -> list[str]:
@@ -1166,31 +1410,23 @@ def guided_path(topic: str, max_steps: int = 10) -> dict:
     }
 
 
-SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", str(BASE_DIR / "source")))
+SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", str(Path.cwd())))
 
 
 def _resolve_within_source_dir(file_path: str) -> Path:
-    """Build a path the same way callers already do (absolute stays absolute,
-    relative is joined to SOURCE_DIR), then verify it actually resolves to a
-    location inside SOURCE_DIR.
+    """Resolve file_path to an absolute path and verify it stays within SOURCE_DIR.
 
-    Raises:
-        ValueError: if the resolved path escapes SOURCE_DIR (path traversal,
-            symlink escape, or an absolute path outside SOURCE_DIR supplied by
-            the MCP client).
+    Raises ValueError if the path escapes SOURCE_DIR (path traversal protection).
     """
     p = Path(file_path)
     if not p.is_absolute():
         p = SOURCE_DIR / file_path
-
     resolved = p.resolve()
     resolved_source_dir = SOURCE_DIR.resolve()
-
     if not resolved.is_relative_to(resolved_source_dir):
         raise ValueError(
             f"path escapes SOURCE_DIR: {resolved} is not within {resolved_source_dir}"
         )
-
     return resolved
 
 
@@ -1540,7 +1776,6 @@ def update_companion(
         p = _resolve_within_source_dir(file_path)
     except ValueError:
         return {"success": False, "path": file_path, "message": "path escapes SOURCE_DIR, refused"}
-
     if not p.exists():
         return {"success": False, "path": str(p), "message": "file not found"}
 
@@ -1631,11 +1866,11 @@ def record_decision(
                     if candidate2.exists():
                         p = candidate2
 
-        if p is not None:
-            try:
-                p = _resolve_within_source_dir(str(p))
-            except ValueError:
-                return {"success": False, "path": str(p), "message": "path escapes SOURCE_DIR, refused"}
+    if p is not None:
+        try:
+            p = _resolve_within_source_dir(str(p))
+        except ValueError:
+            return {"success": False, "path": str(p), "message": "path escapes SOURCE_DIR, refused"}
 
     if p is None or not p.exists():
         return {
@@ -1678,11 +1913,30 @@ DEFAULT_PORT = int(os.environ.get("MCP_PORT", "8000"))
 
 
 def main() -> None:
+    global _watch_dir, _watch_interval
+
     parser = argparse.ArgumentParser(description="CIC Graph MCP Server")
     parser.add_argument("--sse", action="store_true", help="Run as SSE server")
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"SSE bind host (default: {DEFAULT_HOST}, env: MCP_HOST)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"SSE bind port (default: {DEFAULT_PORT}, env: MCP_PORT)")
+    parser.add_argument("--watch-dir", metavar="DIR",
+                        default=os.environ.get("KB_WATCH_DIR", str(Path.cwd())),
+                        help="Watch this directory for file changes and update KB in-memory (default: cwd, env: KB_WATCH_DIR)")
+    parser.add_argument("--watch-interval", type=float, default=float(os.environ.get("KB_WATCH_INTERVAL", "2")),
+                        help="Poll interval for --watch-dir in seconds (default: 2, env: KB_WATCH_INTERVAL)")
     args = parser.parse_args()
+
+    if args.watch_dir:
+        _watch_dir = Path(args.watch_dir).resolve()
+        _watch_interval = args.watch_interval
+        # Build initial KB from source if chunks.pkl is missing
+        if not CHUNKS_PKL.exists():
+            print(f"[watch] chunks.pkl not found — building initial KB from {_watch_dir} ...", flush=True)
+            _bootstrap_kb_from_source(_watch_dir)
+        # Pre-load KB so the embedding model is in memory before the watcher starts
+        load_kb()
+        t = threading.Thread(target=_watch_loop, daemon=True, name="kb-watcher")
+        t.start()
 
     if args.sse:
         print(f"Starting SSE server on http://{args.host}:{args.port}")
