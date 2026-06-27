@@ -491,6 +491,7 @@ def search_query(query: str, top_k: int = DEFAULT_TOPK, threshold: float = 0.0) 
                 "chunk_id": cid,
                 "score": sc,
                 "matched_tokens": sorted(matched.get(cid, set())),
+                "file_path": _extract_chunk_file_path(chunk),
                 "file_paths": _extract_chunk_file_paths(chunk),
                 "line_range": _normalize_line_range(chunk.get("line_range") or meta.get("line_range")),
             })
@@ -511,6 +512,7 @@ def search_query(query: str, top_k: int = DEFAULT_TOPK, threshold: float = 0.0) 
             "chunk_id": cid,
             "score": float(score),
             "matched_tokens": [],
+            "file_path": _extract_chunk_file_path(chunk),
             "file_paths": _extract_chunk_file_paths(chunk),
             "line_range": _normalize_line_range(chunk.get("line_range") or meta.get("line_range")),
         })

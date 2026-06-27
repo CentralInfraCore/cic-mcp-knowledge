@@ -109,8 +109,10 @@ manifest-verify: ##manifest-verify
 
 manifest-update: ##manifest-update
 	@echo "--- Updating repository manifest ---"
-	@docker compose exec builder sh -c 'git ls-files -z \
-		| xargs -0 sha256sum' | grep -v "MANIFEST.sha256" | LC_ALL=C sort > MANIFEST.sha256
+	@git ls-files -z \
+		| xargs -0 sha256sum \
+		| grep -v "MANIFEST.sha256" \
+		| LC_ALL=C sort > MANIFEST.sha256
 	@echo "MANIFEST.sha256 updated"
 
 # =============================================================================
