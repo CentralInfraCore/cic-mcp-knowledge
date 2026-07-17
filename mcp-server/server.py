@@ -252,7 +252,7 @@ def _load_kb_from_disk() -> dict[str, Any]:
     if faiss_idx is not None:
         for i, cid in enumerate(faiss_chunk_ids):
             try:
-                embeddings_by_id[str(cid)] = faiss_idx.reconstruct(i)
+                embeddings_by_id[str(cid)] = np.asarray(faiss_idx.reconstruct(i))
             except Exception:
                 pass
 
@@ -618,6 +618,9 @@ def _watch_loop() -> None:
     except Exception:
         file_state = {}
 
+    if _watch_dir is None:
+        raise RuntimeError("_watch_loop started before _watch_dir was set")
+
     print(f"[watch] watching {_watch_dir}  interval={_watch_interval}s", flush=True)
     while True:
         time.sleep(_watch_interval)
@@ -800,13 +803,6 @@ def search_code(code_snippet: str, top_k: int = DEFAULT_TOPK) -> list[dict]:
             meta = chunk.get("metadata", {})
             if not isinstance(meta, dict):
                 meta = {}
-
-            file_path = (
-                chunk.get("file_path") or
-                meta.get("file_path") or
-                chunk.get("path") or
-                meta.get("path")
-            )
 
             raw_lines = (
                 chunk.get("line_range") or
@@ -1430,7 +1426,7 @@ def _resolve_within_source_dir(file_path: str) -> Path:
     return resolved
 
 
-_COMPANION_LANGS = {
+_COMPANION_LANGS: dict[str, dict[str, Any]] = {
     "go": {"glob": "*.go", "is_test": lambda name: "_test.go" in name},
     "py": {"glob": "*.py", "is_test": lambda name: name.startswith("test_") or name.endswith("_test.py")},
 }
@@ -1588,7 +1584,7 @@ def list_tasks(
 
     Returns list of dicts with keys: repo, sprint, task, status, priority, prompt (truncated).
     """
-    results = []
+    results: list[dict[str, Any]] = []
     for pm_path in _find_promptmaps():
         repo_name = _promptmap_repo_name(pm_path)
         if repo and repo.lower() not in repo_name.lower():
@@ -1656,7 +1652,6 @@ def get_next_task(repo: str = "", sprint: Optional[int] = None) -> Optional[dict
 
 def _update_task_status(pm_path: Path, task_id: str, new_status: str, extra: Optional[dict] = None) -> bool:
     """Mutate a task's status in a PROMPTMAP file. Returns True if found and saved."""
-    import yaml as _yaml
     data = _load_promptmap(pm_path)
     found = False
 
