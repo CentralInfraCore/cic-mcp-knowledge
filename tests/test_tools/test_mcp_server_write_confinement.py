@@ -8,7 +8,6 @@ Covers the path-traversal fix in mcp-server/server.py:
 """
 import os
 import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
