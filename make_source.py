@@ -759,16 +759,38 @@ def save_kb_to_sqlite(kb_data, output_dir="sqlite_data"):
     cursor.execute("ANALYZE;")
     conn.close()
 
+# What each edge type means, as produced by build_knowledge_base(). The traversal tools treat
+# every edge alike unless an edge_types allow-list is passed, so readers need to know that the
+# types are not interchangeable.
+EDGE_TYPE_DESCRIPTIONS = {
+    'refers-to': "chunk-order chain: every node points to the next chunk in the global index, "
+                 "across file boundaries. Navigation order, not a semantic relation.",
+    'related-to': "embedding similarity: cosine similarity of the two chunks is above 0.7. "
+                  "A content-similarity signal, not a dependency.",
+    'references': "explicit reference: the `related_nodes` of a companion YAML names the target.",
+    'calls': "call graph: a Go chunk calls a function that is indexed as another Go node "
+             "(matched by name).",
+}
+
+
 def generate_edge_types_doc(kb_data, output_dir="kb_data"):
-    """Generates a markdown file documenting all unique edge types."""
-    edge_types = sorted(list(set(edge['type'] for edge in kb_data['edges'].values())))
+    """Generates a markdown file documenting all unique edge types and what each one means.
+
+    Counts are deliberately left out: the file is tracked, and per-build counts would change
+    it on every rebuild.
+    """
+    edge_types = sorted(set(edge['type'] for edge in kb_data['edges'].values()))
 
     content = "# Edge Types Documentation\n\n"
     content += "This document lists all unique edge types automatically discovered in the knowledge graph.\n\n"
     content += "Understanding these relationships is key to querying and interpreting the graph's structure.\n\n"
+    content += ("The types are not interchangeable. The graph traversal tools (`focus_pack`, "
+                "`impact_analysis`, `guided_path`) follow every edge by default; pass `edge_types` "
+                "to restrict them.\n\n")
 
     for edge_type in edge_types:
-        content += f"- `{edge_type}`\n"
+        description = EDGE_TYPE_DESCRIPTIONS.get(edge_type, "no description registered for this type.")
+        content += f"- `{edge_type}`: {description}\n"
 
     doc_path = os.path.join(output_dir, 'edge_types.md')
     with open(doc_path, 'w', encoding='utf-8') as f:

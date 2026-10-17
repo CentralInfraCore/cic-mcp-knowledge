@@ -145,5 +145,7 @@ objects:
 - name: generate_edge_types_doc
   kind: function
   decorators: []
-  description: Generates a markdown file documenting all unique edge types.
+  description: 'Generates a markdown file documenting all unique edge types and what
+    each one means. Counts are deliberately left out: the file is tracked, and per-build
+    counts would change it on every rebuild.'
   references: []

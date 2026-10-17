@@ -640,6 +640,28 @@ def _watch_loop() -> None:
             print(f"[watch] error: {exc}", flush=True)
 
 
+def _edge_type_of(edge: dict) -> str:
+    return str(edge.get("type") or edge.get("edge_type") or "")
+
+
+def _allowed_edge_types(edge_types: Optional[list[str]]) -> Optional[set[str]]:
+    """Normalise the optional edge-type allow-list of the traversal tools.
+
+    None means "follow every edge" (the historical behaviour). A list restricts the
+    traversal to those types, compared case-insensitively. An empty list follows no
+    edge at all.
+    """
+    if edge_types is None:
+        return None
+    return {str(t).lower() for t in edge_types}
+
+
+def _follow_edges(edges: list[dict], allowed: Optional[set[str]]) -> list[dict]:
+    if allowed is None:
+        return edges
+    return [e for e in edges if _edge_type_of(e).lower() in allowed]
+
+
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -1005,7 +1027,13 @@ def neighbors(node_id: str, edge_type: Optional[str] = None, limit: int = 50) ->
     return outs[:max_n]
 
 @mcp.tool()
-def focus_pack(query: str, depth: int = 1, top_k: int = 5, max_rules: int = 3) -> dict:
+def focus_pack(
+    query: str,
+    depth: int = 1,
+    top_k: int = 5,
+    max_rules: int = 3,
+    edge_types: Optional[list[str]] = None,
+) -> dict:
     """
     Build an enriched task context bundle.
 
@@ -1013,8 +1041,12 @@ def focus_pack(query: str, depth: int = 1, top_k: int = 5, max_rules: int = 3) -
     - prioritizes rule-like chunks/files (CONTRACT, DoD, LIMITS)
     - returns 'key_rules'
     - returns 'recommended_reading_order'
+
+    edge_types: optional allow-list of edge types followed during graph expansion
+    (e.g. ["calls", "references"]). Default None follows every edge.
     """
     kb = load_kb()
+    allowed = _allowed_edge_types(edge_types)
 
     # Safety limits
     depth = max(0, min(int(depth), 2))
@@ -1051,7 +1083,7 @@ def focus_pack(query: str, depth: int = 1, top_k: int = 5, max_rules: int = 3) -
     for _ in range(depth):
         new_frontier = []
         for node_id in frontier:
-            for e in kb["adj"].get(node_id, []):
+            for e in _follow_edges(kb["adj"].get(node_id, []), allowed):
                 # Robust edge target extraction
                 target = str(e.get("target") or e.get("to") or e.get("dest") or e.get("dst") or "")
                 if target and target not in related_nodes:
@@ -1131,7 +1163,7 @@ def focus_pack(query: str, depth: int = 1, top_k: int = 5, max_rules: int = 3) -
             recommended_files.append(fp)
             seen_files.add(fp)
 
-    return {
+    result = {
         "query": query,
         "primary_nodes": primary_nodes,
         "related_nodes": sorted(list(related_nodes)),
@@ -1140,6 +1172,9 @@ def focus_pack(query: str, depth: int = 1, top_k: int = 5, max_rules: int = 3) -
         "key_rules": key_rules,
         "recommended_reading_order": recommended_files,
     }
+    if allowed is not None:
+        result["edge_types"] = sorted(allowed)
+    return result
 
 @mcp.tool()
 def explain_node(node_id: str) -> dict:
@@ -1228,7 +1263,7 @@ def find_nodes(
 
 
 @mcp.tool()
-def impact_analysis(node_id: str, max_depth: int = 3) -> dict:
+def impact_analysis(node_id: str, max_depth: int = 3, edge_types: Optional[list[str]] = None) -> dict:
     """Analyse the downstream impact of a node: what depends on it, critical paths, used_in coverage.
 
     Performs BFS from node_id through the adjacency graph, collects all reachable downstream
@@ -1237,10 +1272,12 @@ def impact_analysis(node_id: str, max_depth: int = 3) -> dict:
     Args:
         node_id: The node to start from.
         max_depth: BFS depth limit (default 3, max 5).
+        edge_types: Optional allow-list of edge types to follow (default None: every edge).
     """
     kb = load_kb()
     nodes = kb["nodes"]
     adj = kb["adj"]
+    allowed = _allowed_edge_types(edge_types)
 
     max_depth = max(1, min(int(max_depth), 5))
     start = str(node_id)
@@ -1257,7 +1294,7 @@ def impact_analysis(node_id: str, max_depth: int = 3) -> dict:
         current, depth = queue.pop(0)
         if depth >= max_depth:
             continue
-        edges = adj.get(current, [])
+        edges = _follow_edges(adj.get(current, []), allowed)
         fan_out[current] = len(edges)
         for edge in edges:
             target = str(edge.get("target") or edge.get("to") or edge.get("dest") or edge.get("dst") or "")
@@ -1294,7 +1331,7 @@ def impact_analysis(node_id: str, max_depth: int = 3) -> dict:
         reverse=True,
     )[:10]
 
-    return {
+    result = {
         "node_id": start,
         "label": nodes.get(start, {}).get("label", start),
         "total_downstream": len(downstream),
@@ -1303,10 +1340,13 @@ def impact_analysis(node_id: str, max_depth: int = 3) -> dict:
         "used_in_coverage": {k: v for k, v in sorted(used_in_agg.items(), key=lambda x: -len(x[1]))},
         "critical_paths": critical,
     }
+    if allowed is not None:
+        result["edge_types"] = sorted(allowed)
+    return result
 
 
 @mcp.tool()
-def guided_path(topic: str, max_steps: int = 10) -> dict:
+def guided_path(topic: str, max_steps: int = 10, edge_types: Optional[list[str]] = None) -> dict:
     """Build an ordered learning path for a topic through the knowledge graph.
 
     Selects entrypoint nodes matching the topic, then traverses the graph in
@@ -1316,10 +1356,12 @@ def guided_path(topic: str, max_steps: int = 10) -> dict:
     Args:
         topic: The topic or concept to learn about.
         max_steps: Maximum nodes in the path (default 10, max 20).
+        edge_types: Optional allow-list of edge types to follow (default None: every edge).
     """
     kb = load_kb()
     nodes = kb["nodes"]
     adj = kb["adj"]
+    allowed = _allowed_edge_types(edge_types)
     chunk_to_nodes = kb.get("chunk_to_nodes", {})
 
     max_steps = max(1, min(int(max_steps), 20))
@@ -1385,7 +1427,7 @@ def guided_path(topic: str, max_steps: int = 10) -> dict:
         })
 
         # Expand neighbours, prioritise by category rank
-        edges = adj.get(current, [])
+        edges = _follow_edges(adj.get(current, []), allowed)
         children: list[tuple[str, str]] = []
         for edge in edges:
             target = str(edge.get("target") or edge.get("to") or edge.get("dest") or edge.get("dst") or "")
@@ -1398,12 +1440,15 @@ def guided_path(topic: str, max_steps: int = 10) -> dict:
         children.sort(key=lambda x: _cat_rank(nodes.get(x[0], {})))
         queue = children + queue   # depth-first within priority
 
-    return {
+    result = {
         "topic": topic,
         "start_node": start,
         "entrypoints_found": len(entrypoints),
         "path": path,
     }
+    if allowed is not None:
+        result["edge_types"] = sorted(allowed)
+    return result
 
 
 SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", str(Path.cwd())))
