@@ -242,7 +242,8 @@ objects:
   - mcp.tool
   description: 'Build an enriched task context bundle. Compared to standard search:
     - prioritizes rule-like chunks/files (CONTRACT, DoD, LIMITS) - returns ''key_rules''
-    - returns ''recommended_reading_order'''
+    - returns ''recommended_reading_order'' edge_types: optional allow-list of edge
+    types followed during graph expansion (default None follows every edge).'
   references: []
 - name: explain_node
   kind: function
@@ -267,7 +268,8 @@ objects:
     paths, used_in coverage. Performs BFS from node_id through the adjacency graph,
     collects all reachable downstream nodes, aggregates used_in fields, and identifies
     critical path nodes (highest fan-out). Args: node_id: The node to start from.
-    max_depth: BFS depth limit (default 3, max 5).'
+    max_depth: BFS depth limit (default 3, max 5). edge_types: Optional allow-list
+    of edge types to follow (default None: every edge).'
   references: []
 - name: guided_path
   kind: function
@@ -277,7 +279,8 @@ objects:
     Selects entrypoint nodes matching the topic, then traverses the graph in category
     priority order (concept → architecture → flow → implementation) to return a structured
     reading sequence. Args: topic: The topic or concept to learn about. max_steps:
-    Maximum nodes in the path (default 10, max 20).'
+    Maximum nodes in the path (default 10, max 20). edge_types: Optional allow-list
+    of edge types to follow (default None: every edge).'
   references: []
 - name: SOURCE_DIR
   kind: const
